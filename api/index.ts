@@ -13,13 +13,14 @@ app.use(cookieParser());
 
 // Initialize DB on serverless invocation BEFORE mounting routes
 let dbInitialized = false;
-app.use(async (_req, _res, next) => {
+app.use(async (_req, res, next) => {
   if (!dbInitialized) {
     try {
       await db.init();
       dbInitialized = true;
     } catch (err) {
       console.error('[Vercel Serverless] Failed to initialize DB:', err);
+      return res.status(503).json({ error: 'Service temporarily unavailable. Database initialization failed.' });
     }
   }
   next();

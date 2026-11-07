@@ -1,7 +1,7 @@
 /**
  * DANASI OPPORTUNITY HUB — Authentication & Authorization Middleware
  * Founder: NDAYIZEYE Samuel
- * 
+ *
  * Supports both Bearer Token and Secure HTTP-Only Cookie session management.
  * Protects admin routes and enforces server-side role validation.
  */
@@ -9,6 +9,8 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { db } from './db.ts';
+import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs } from 'firebase/firestore';
+import { firestore } from './db.ts';
 import { User, UserProfile, UserRole } from '../types/index.ts';
 
 interface SessionData {
@@ -16,31 +18,56 @@ interface SessionData {
   expiresAt: number;
 }
 
-const sessions = new Map<string, SessionData>();
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-// Rate limiter storage for IP authentication attempts
+// ---------------------------------------------------------------------------
+// Firestore-backed persistent sessions (survive cold starts & multi-instance)
+// ---------------------------------------------------------------------------
+async function storeSession(token: string, data: SessionData): Promise<void> {
+  await setDoc(doc(firestore, 'sessions', token), data);
+}
+
+async function getSession(token: string): Promise<SessionData | null> {
+  const snap = await getDoc(doc(firestore, 'sessions', token));
+  return snap.exists() ? (snap.data() as SessionData) : null;
+}
+
+async function deleteSession(token: string): Promise<void> {
+  try {
+    await deleteDoc(doc(firestore, 'sessions', token));
+  } catch {
+    // best-effort
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Firestore-backed rate limiter (atomic, shared across instances)
+// ---------------------------------------------------------------------------
 interface RateLimitBucket {
   count: number;
   resetAt: number;
 }
-const rateLimitMap = new Map<string, RateLimitBucket>();
 
-export function checkRateLimit(key: string, maxAttempts = 10, windowMs = 60 * 1000): { allowed: boolean; retryAfter?: number } {
+export async function checkRateLimit(
+  key: string,
+  maxAttempts = 10,
+  windowMs = 60 * 1000
+): Promise<{ allowed: boolean; retryAfter?: number }> {
   const now = Date.now();
-  const bucket = rateLimitMap.get(key);
+  const ref = doc(firestore, 'rate_limit_buckets', key.replace(/[^a-zA-Z0-9_@.-]/g, '_'));
+  const snap = await getDoc(ref);
 
-  if (!bucket || now > bucket.resetAt) {
-    rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
+  if (!snap.exists() || now > (snap.data() as RateLimitBucket).resetAt) {
+    await setDoc(ref, { count: 1, resetAt: now + windowMs });
     return { allowed: true };
   }
 
+  const bucket = snap.data() as RateLimitBucket;
   if (bucket.count >= maxAttempts) {
-    const retryAfter = Math.ceil((bucket.resetAt - now) / 1000);
-    return { allowed: false, retryAfter };
+    return { allowed: false, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
   }
 
-  bucket.count++;
+  await setDoc(ref, { count: bucket.count + 1, resetAt: bucket.resetAt });
   return { allowed: true };
 }
 
@@ -48,15 +75,15 @@ export function createSessionToken(userId: string): string {
   const token = `danasi_${crypto.randomBytes(32).toString('hex')}`;
   sessions.set(token, {
     userId,
-    expiresAt: Date.now() + SESSION_TTL
-  });
-  return token;
-}
+  // Fire-and-forget — callers await via routes
+  storeSession(token, { userId, expiresAt: Date.now() + SESSION_TTL }).catch((err) =>
+    console.error('[AUTH] Failed to persist session:', err)
+  );
 
 export function revokeSessionToken(token: string): void {
   sessions.delete(token);
 }
-
+  deleteSession(token).catch((err) => console.error('[AUTH] Failed to revoke session:', err));
 export function sanitizeUser(user: User) {
   const { passwordHash, salt, ...safeUser } = user;
   return safeUser;
@@ -87,13 +114,13 @@ export async function authenticate(req: AuthenticatedRequest, _res: Response, ne
     }
 
     const session = sessions.get(token);
-    if (!session) {
+    const session = await getSession(token);
       return next();
     }
 
     if (Date.now() > session.expiresAt) {
       sessions.delete(token);
-      return next();
+      await deleteSession(token);
     }
 
     const user = await db.getUserById(session.userId);

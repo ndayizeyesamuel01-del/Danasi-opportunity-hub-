@@ -678,7 +678,11 @@ class FirestoreDatabase {
     batch.set(doc(firestore, 'platform_settings', 'global'), settings);
 
     // Super Admin Account (Founder: NDAYIZEYE Samuel)
-    const superAdminId = 'user_super_admin_001';
+    const adminInitialPassword = process.env.DANASI_ADMIN_INITIAL_PASSWORD;
+    if (!adminInitialPassword) {
+      throw new Error('[Firestore] DANASI_ADMIN_INITIAL_PASSWORD env variable is required for first-run seeding.');
+    }
+    const { hash: adminHash, salt: adminSalt } = hashPassword(adminInitialPassword);
     const { hash: adminHash, salt: adminSalt } = hashPassword('DanasiAdmin2026!');
     batch.set(doc(firestore, 'users', superAdminId), {
       id: superAdminId,
@@ -708,7 +712,11 @@ class FirestoreDatabase {
     });
 
     // Test Candidate Account (Aline Keza)
-    const studentId = 'user_student_002';
+    const studentInitialPassword = process.env.DANASI_STUDENT_INITIAL_PASSWORD;
+    if (!studentInitialPassword) {
+      throw new Error('[Firestore] DANASI_STUDENT_INITIAL_PASSWORD env variable is required for first-run seeding.');
+    }
+    const { hash: studentHash, salt: studentSalt } = hashPassword(studentInitialPassword);
     const { hash: studentHash, salt: studentSalt } = hashPassword('Student2026!');
     batch.set(doc(firestore, 'users', studentId), {
       id: studentId,

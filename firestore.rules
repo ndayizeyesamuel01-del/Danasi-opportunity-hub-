@@ -1,7 +1,9 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Platform collections accessible by application services and authenticated clients
+    // All write operations are exclusively handled by server-side API routes.
+    // Direct client writes are blocked across all collections.
+    // Read access is restricted to genuinely public data only.
     match /platform_settings/{settingId} {
       allow read: if true;
       allow write: if false; // Only server backend can modify settings
@@ -23,22 +25,22 @@ service cloud.firestore {
     }
 
     match /user_preferences/{userId} {
-      allow read: if true;
+      allow read: if false; // PII — server API only
       allow write: if false;
     }
 
     match /roles/{roleId} {
-      allow read: if true;
+      allow read: if false; // Private user settings — server API only
       allow write: if false;
     }
 
     match /notifications/{notificationId} {
-      allow read: if true;
+      allow read: if false; // Role definitions and permissions are backend-only
       allow write: if false;
     }
 
     match /audit_logs/{auditId} {
-      allow read: if false; // Audit logs are strictly server-managed
+      allow read: if false; // Per-user notifications — server API only
       allow write: if false;
     }
 
@@ -50,7 +52,7 @@ service cloud.firestore {
     match /saved_items/{savedId} {
       allow read: if true;
       allow write: if false;
-    }
+      allow read: if false; // User saved items — server API only
 
     // DANASI JOBS Module Collections
     match /jobs/{jobId} {
@@ -74,12 +76,12 @@ service cloud.firestore {
     }
 
     match /saved_jobs/{savedJobId} {
-      allow read: if true;
+      allow read: if false; // User saved jobs — server API only
       allow write: if false;
     }
 
     match /job_applications/{applicationId} {
-      allow read: if true;
+      allow read: if false; // Application tracker data — server API only
       allow write: if false;
     }
 

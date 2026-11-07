@@ -5,7 +5,7 @@
 
 import { Router, Response } from 'express';
 import crypto from 'crypto';
-import { db, hashPassword, verifyPassword } from './db.ts';
+import { db, hashPassword, verifyPassword, firestore } from './db.ts';
 import {
   authenticate,
   requireAuth,
@@ -16,6 +16,7 @@ import {
   sanitizeUser,
   checkRateLimit,
   AuthenticatedRequest
+import { doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 } from './auth.ts';
 import { EducationLevel, LanguageCode, UserRole } from '../types/index.ts';
 import { syncManager } from './sync/SyncManager.ts';
@@ -25,9 +26,10 @@ export const apiRouter = Router();
 
 // Middleware to populate req.user from Bearer token or HTTP-only cookie
 apiRouter.use(authenticate);
+// On Vercel, the socket remote address is the trusted Vercel edge IP.
+// We never trust the attacker-controllable X-Forwarded-For header for
+// security decisions. Rate-limit keys are based on email identity instead.
 
-function getClientIp(req: AuthenticatedRequest): string {
-  const forwarded = req.headers['x-forwarded-for'];
   if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
   return req.socket.remoteAddress || '127.0.0.1';
 }
@@ -47,8 +49,9 @@ function setSessionCookie(res: Response, token: string) {
 
 apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const clientIp = getClientIp(req);
-    const rateCheck = checkRateLimit(`register_${clientIp}`, 5, 60 * 1000);
+    const { email } = req.body;
+    const rateKey = `register_${(email || '').trim().toLowerCase()}`;
+    const rateCheck = await checkRateLimit(rateKey, 5, 60 * 1000);
     if (!rateCheck.allowed) {
       return res.status(429).json({
         error: `Too many registration attempts. Please wait ${rateCheck.retryAfter} seconds.`
@@ -56,7 +59,6 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
     }
 
     const {
-      email,
       password,
       fullName,
       phone,
@@ -176,15 +178,15 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
 
 apiRouter.post('/auth/login', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const clientIp = getClientIp(req);
-    const rateCheck = checkRateLimit(`login_${clientIp}`, 10, 60 * 1000);
+    const { email, password } = req.body;
+    const rateKey = `login_${(email || '').trim().toLowerCase()}`;
+    const rateCheck = await checkRateLimit(rateKey, 10, 60 * 1000);
     if (!rateCheck.allowed) {
       return res.status(429).json({
         error: `Too many login attempts. Please wait ${rateCheck.retryAfter} seconds.`
       });
     }
 
-    const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
@@ -256,66 +258,111 @@ apiRouter.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Re
 });
 
 apiRouter.post('/auth/forgot-password', async (req: AuthenticatedRequest, res: Response) => {
+  // Always return a generic message to avoid email enumeration.
   const { email } = req.body;
   if (!email) {
     return res.status(400).json({ error: 'Email address is required.' });
   }
 
-  const user = await db.getUserByEmail(email);
-  if (!user) {
-    return res.json({
-      message: 'If an account exists with this email, password reset instructions have been dispatched.'
-    });
+  const GENERIC_MSG = 'If an account exists with this email, password reset instructions have been dispatched.';
+
+  try {
+    const user = await db.getUserByEmail(email.trim().toLowerCase());
+    if (user) {
+      // Generate a cryptographically secure single-use token
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      const expiresAt = Date.now() + 60 * 60 * 1000; // 1 hour
+
+      // Store only the hash server-side with expiry
+      await setDoc(doc(firestore, 'password_reset_tokens', tokenHash), {
+        userId: user.id,
+        expiresAt,
+        used: false
+      });
+
+      await db.addAuditLog({
+        actorId: user.id,
+        actorEmail: user.email,
+        action: 'PASSWORD_RESET_REQUEST',
+        entity: 'User',
+        entityId: user.id,
+        details: 'Password reset token generated and stored (hash only).',
+        ipAddress: getClientIp(req)
+      });
+
+      // In production, send rawToken via verified SMTP email only.
+      // If no email transport is configured, we fail safely and log.
+      if (!process.env.SMTP_HOST) {
+        console.warn('[AUTH] SMTP not configured — password reset token NOT delivered. Configure SMTP_HOST to enable email delivery.');
+      }
+      // Never expose rawToken in the API response.
+    }
+  } catch (err) {
+    console.error('[API] forgot-password error:', err);
+    // Fall through to return the same generic message regardless of errors.
   }
 
-  const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
-
-  await db.addAuditLog({
-    actorId: user.id,
-    actorEmail: user.email,
-    action: 'PASSWORD_RESET_REQUEST',
-    entity: 'User',
-    entityId: user.id,
-    details: 'Password reset code generated.',
-    ipAddress: getClientIp(req)
-  });
-
-  return res.json({
-    message: 'Reset instructions have been sent.',
-    recoveryCode: resetCode,
-    note: 'In production, this code is transmitted exclusively via verified SMTP email.'
-  });
+  return res.json({ message: GENERIC_MSG });
 });
 
 apiRouter.post('/auth/reset-password', async (req: AuthenticatedRequest, res: Response) => {
-  const { email, newPassword, recoveryCode } = req.body;
-  if (!email || !newPassword || !recoveryCode) {
-    return res.status(400).json({ error: 'Email, recovery code, and new password are required.' });
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: 'Reset token and new password are required.' });
   }
 
   if (newPassword.length < 8) {
     return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
   }
 
-  const user = await db.getUserByEmail(email);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found.' });
+  try {
+    // Derive the hash of the submitted token and look it up
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const tokenRef = doc(firestore, 'password_reset_tokens', tokenHash);
+    const tokenSnap = await getDoc(tokenRef);
+
+    if (!tokenSnap.exists()) {
+      return res.status(400).json({ error: 'Invalid or expired reset token.' });
+    }
+
+    const tokenData = tokenSnap.data() as { userId: string; expiresAt: number; used: boolean };
+
+    if (tokenData.used) {
+      return res.status(400).json({ error: 'This reset token has already been used.' });
+    }
+
+    if (Date.now() > tokenData.expiresAt) {
+      await deleteDoc(tokenRef);
+      return res.status(400).json({ error: 'Invalid or expired reset token.' });
+    }
+
+    const user = await db.getUserById(tokenData.userId);
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired reset token.' });
+    }
+
+    // Invalidate the token immediately (single-use)
+    await setDoc(tokenRef, { ...tokenData, used: true });
+
+    const { hash, salt } = hashPassword(newPassword);
+    await db.updateUser(user.id, { passwordHash: hash, salt });
+
+    await db.addAuditLog({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'PASSWORD_RESET_SUCCESS',
+      entity: 'User',
+      entityId: user.id,
+      details: 'Password successfully changed via secure reset token.',
+      ipAddress: getClientIp(req)
+    });
+
+    return res.json({ message: 'Password has been successfully reset. You may now sign in.' });
+  } catch (err) {
+    console.error('[API] reset-password error:', err);
+    return res.status(500).json({ error: 'Failed to reset password. Please try again.' });
   }
-
-  const { hash, salt } = hashPassword(newPassword);
-  await db.updateUser(user.id, { passwordHash: hash, salt });
-
-  await db.addAuditLog({
-    actorId: user.id,
-    actorEmail: user.email,
-    action: 'PASSWORD_RESET_SUCCESS',
-    entity: 'User',
-    entityId: user.id,
-    details: 'Password successfully changed via reset code.',
-    ipAddress: getClientIp(req)
-  });
-
-  return res.json({ message: 'Password has been successfully reset. You may now sign in.' });
 });
 
 apiRouter.post('/auth/verify-email', requireAuth, async (req: AuthenticatedRequest, res: Response) => {

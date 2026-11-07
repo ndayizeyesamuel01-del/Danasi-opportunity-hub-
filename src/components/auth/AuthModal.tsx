@@ -106,10 +106,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       const res = await api.forgotPassword(email);
       setInfo(res.message);
-      if (res.recoveryCode) {
-        setRecoveryCode(res.recoveryCode);
-        setMode('reset');
-      }
     } catch (err: any) {
       setError(err.message || 'Could not send recovery instructions.');
     } finally {
@@ -117,20 +113,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const handleResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-    try {
-      await api.resetPassword({ email, recoveryCode, newPassword });
-      setInfo('Password reset successfully. You can now sign in.');
-      setMode('login');
-      setPassword(newPassword);
-    } catch (err: any) {
-      setError(err.message || 'Failed to reset password.');
-    } finally {
-      setLoading(false);
-    }
   };
 
   // Quick Testing Helper
@@ -186,29 +168,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <span>{info}</span>
             </div>
           )}
-
-          {/* Quick Demo Account Selector */}
-          <div className="p-3 rounded-xl bg-slate-100 border border-slate-200 text-xs space-y-2">
-            <div className="flex items-center justify-between text-slate-600 font-semibold text-[11px]">
-              <span>Quick Test Accounts:</span>
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => fillCredentials('super_admin')}
-                className="flex-1 py-1.5 px-2 bg-slate-900 text-white hover:bg-slate-800 rounded text-[11px] font-medium transition-colors truncate"
-              >
-                Admin (DANASI)
-              </button>
-              <button
-                type="button"
-                onClick={() => fillCredentials('student')}
-                className="flex-1 py-1.5 px-2 bg-blue-700 text-white hover:bg-blue-600 rounded text-[11px] font-medium transition-colors truncate"
-              >
-                Candidate (Aline)
-              </button>
-            </div>
-          </div>
 
           {/* LOGIN FORM */}
           {mode === 'login' && (

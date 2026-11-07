@@ -95,7 +95,10 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
     const userId = `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const { hash, salt } = hashPassword(password);
 
-    // Assign role safely: Allow OPPORTUNITY_PROVIDER if explicitly selected, otherwise default to STUDENT_JOBSEEKER
+    // Enforce strict public role boundaries: self-registration is strictly forbidden for administrative roles
+    if (req.body.role && ['SUPER_ADMIN', 'ADMIN', 'CONTENT_MANAGER'].includes(req.body.role)) {
+      return res.status(403).json({ error: 'Self-assignment of administrative roles is strictly prohibited.' });
+    }
     const userRole: UserRole = accountType === 'OPPORTUNITY_PROVIDER' ? 'OPPORTUNITY_PROVIDER' : 'STUDENT_JOBSEEKER';
 
     const newUser = {
@@ -550,6 +553,14 @@ apiRouter.get('/platform-info', async (_req: AuthenticatedRequest, res: Response
 /* -------------------------------------------------------------------------- */
 /* ADMIN ROUTES (ROLE PROTECTED)                                              */
 /* -------------------------------------------------------------------------- */
+
+// Global gatekeeper middleware for all /admin routes ensuring authenticated admin session
+apiRouter.use('/admin', requireAuth, (req: AuthenticatedRequest, res: Response, next) => {
+  if (!req.user || !['SUPER_ADMIN', 'ADMIN', 'CONTENT_MANAGER'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Administrative privileges required.' });
+  }
+  next();
+});
 
 apiRouter.get(
   '/admin/overview',

@@ -14,6 +14,7 @@ import {
   createSessionToken,
   revokeSessionToken,
   sanitizeUser,
+  checkRateLimit,
   AuthenticatedRequest
 } from './auth.ts';
 import { EducationLevel, LanguageCode, UserRole } from '../types/index.ts';
@@ -46,12 +47,22 @@ function setSessionCookie(res: Response, token: string) {
 
 apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const clientIp = getClientIp(req);
+    const rateCheck = checkRateLimit(`register_${clientIp}`, 5, 60 * 1000);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        error: `Too many registration attempts. Please wait ${rateCheck.retryAfter} seconds.`
+      });
+    }
+
     const {
       email,
       password,
       fullName,
+      phone,
       country,
       city,
+      accountType,
       educationLevel,
       professionalInterests,
       preferredCategories,
@@ -85,13 +96,15 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
     const userId = `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const { hash, salt } = hashPassword(password);
 
-    // CRITICAL SECURITY: Role is forced to STUDENT_JOBSEEKER. Never trust client payload role!
+    // Assign role safely: Allow OPPORTUNITY_PROVIDER if explicitly selected, otherwise default to STUDENT_JOBSEEKER
+    const userRole: UserRole = accountType === 'OPPORTUNITY_PROVIDER' ? 'OPPORTUNITY_PROVIDER' : 'STUDENT_JOBSEEKER';
+
     const newUser = {
       id: userId,
       email: email.trim().toLowerCase(),
       passwordHash: hash,
       salt,
-      role: 'STUDENT_JOBSEEKER' as UserRole,
+      role: userRole,
       emailVerified: false,
       isSuspended: false,
       createdAt: now,
@@ -101,6 +114,7 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
     const newProfile = {
       userId,
       fullName: fullName.trim(),
+      phone: phone?.trim() || undefined,
       country: country || 'Rwanda',
       city: city || 'Kigali',
       educationLevel: (educationLevel as EducationLevel) || "Bachelor's Degree",
@@ -162,6 +176,14 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
 
 apiRouter.post('/auth/login', async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const clientIp = getClientIp(req);
+    const rateCheck = checkRateLimit(`login_${clientIp}`, 10, 60 * 1000);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        error: `Too many login attempts. Please wait ${rateCheck.retryAfter} seconds.`
+      });
+    }
+
     const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
@@ -1149,6 +1171,72 @@ apiRouter.post(
     } catch (err) {
       console.error('[API] Error moderating job:', err);
       return res.status(500).json({ error: 'Failed to moderate opportunity.' });
+    }
+  }
+);
+
+/* -------------------------------------------------------------------------- */
+/* REAL JOB DATA PROVIDERS & SYNCHRONIZATION ROUTES                           */
+/* -------------------------------------------------------------------------- */
+
+apiRouter.get(
+  '/admin/job-sources',
+  requireAuth,
+  requireRole(['SUPER_ADMIN', 'ADMIN']),
+  async (_req: AuthenticatedRequest, res: Response) => {
+    try {
+      const sources = await db.getJobSources();
+      return res.json({ sources });
+    } catch (err) {
+      console.error('[API] Error fetching job sources:', err);
+      return res.status(500).json({ error: 'Failed to load job sources.' });
+    }
+  }
+);
+
+apiRouter.post(
+  '/admin/job-sources/:id/sync',
+  requireAuth,
+  requireRole(['SUPER_ADMIN', 'ADMIN']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const sourceId = req.params.id;
+      const result = await syncManager.syncProvider(sourceId, req.user!.email, 'MANUAL');
+      return res.json({ message: `Provider ${sourceId} synchronization initiated.`, syncRun: result });
+    } catch (err: any) {
+      console.error('[API] Error synchronizing job provider:', err);
+      return res.status(500).json({ error: err.message || 'Failed to synchronize job provider.' });
+    }
+  }
+);
+
+apiRouter.post(
+  '/admin/job-sources/sync-all',
+  requireAuth,
+  requireRole(['SUPER_ADMIN', 'ADMIN']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const results = await syncManager.syncAllActive(req.user!.email, 'MANUAL');
+      return res.json({ message: 'Synchronized all active job data providers.', syncRuns: results });
+    } catch (err: any) {
+      console.error('[API] Error synchronizing all active providers:', err);
+      return res.status(500).json({ error: err.message || 'Failed to sync providers.' });
+    }
+  }
+);
+
+apiRouter.get(
+  '/admin/job-sources/sync-runs',
+  requireAuth,
+  requireRole(['SUPER_ADMIN', 'ADMIN']),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 30;
+      const syncRuns = await db.getSyncRuns(limit);
+      return res.json({ syncRuns });
+    } catch (err) {
+      console.error('[API] Error loading sync runs:', err);
+      return res.status(500).json({ error: 'Failed to retrieve sync runs.' });
     }
   }
 );

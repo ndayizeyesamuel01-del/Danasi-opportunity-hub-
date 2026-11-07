@@ -1,74 +1,106 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Platform collections accessible by application services
+    // Platform collections accessible by application services and authenticated clients
     match /platform_settings/{settingId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false; // Only server backend can modify settings
     }
 
     match /opportunity_categories/{categoryId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false; // Only server backend can modify categories
     }
 
     match /users/{userId} {
-      allow read, write: if true;
+      allow read: if false; // User credentials & password hashes are private to backend
+      allow write: if false;
     }
 
     match /user_profiles/{userId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false; // Modifications must pass through backend API validation
     }
 
     match /user_preferences/{userId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
     }
 
     match /roles/{roleId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
     }
 
     match /notifications/{notificationId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
     }
 
     match /audit_logs/{auditId} {
-      allow read, write: if true;
+      allow read: if false; // Audit logs are strictly server-managed
+      allow write: if false;
     }
 
     match /contact_messages/{messageId} {
-      allow read, write: if true;
+      allow read: if false;
+      allow write: if false;
     }
 
     match /saved_items/{savedId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
     }
 
     // DANASI JOBS Module Collections
     match /jobs/{jobId} {
-      allow read, write: if true;
+      allow read: if true; // Public verified jobs discovery
+      allow write: if false; // Job posting must pass through backend validation & moderation
     }
 
     match /employers/{employerId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
     }
 
     match /job_categories/{categoryId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
     }
 
     match /job_reports/{reportId} {
-      allow read, write: if true;
+      allow read: if false;
+      allow write: if false;
     }
 
     match /saved_jobs/{savedJobId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
     }
 
     match /job_applications/{applicationId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
     }
 
     match /verification_records/{recordId} {
-      allow read, write: if true;
+      allow read: if false;
+      allow write: if false;
+    }
+
+    match /job_sources/{sourceId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /job_sync_runs/{runId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /job_source_logs/{logId} {
+      allow read: if false;
+      allow write: if false;
     }
 
     // Default deny for unmapped paths

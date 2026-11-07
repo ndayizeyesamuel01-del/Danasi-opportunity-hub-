@@ -19,6 +19,31 @@ interface SessionData {
 const sessions = new Map<string, SessionData>();
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// Rate limiter storage for IP authentication attempts
+interface RateLimitBucket {
+  count: number;
+  resetAt: number;
+}
+const rateLimitMap = new Map<string, RateLimitBucket>();
+
+export function checkRateLimit(key: string, maxAttempts = 10, windowMs = 60 * 1000): { allowed: boolean; retryAfter?: number } {
+  const now = Date.now();
+  const bucket = rateLimitMap.get(key);
+
+  if (!bucket || now > bucket.resetAt) {
+    rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
+    return { allowed: true };
+  }
+
+  if (bucket.count >= maxAttempts) {
+    const retryAfter = Math.ceil((bucket.resetAt - now) / 1000);
+    return { allowed: false, retryAfter };
+  }
+
+  bucket.count++;
+  return { allowed: true };
+}
+
 export function createSessionToken(userId: string): string {
   const token = `danasi_${crypto.randomBytes(32).toString('hex')}`;
   sessions.set(token, {

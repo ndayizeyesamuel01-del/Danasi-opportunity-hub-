@@ -156,5 +156,11 @@ export const api = {
   moderateJob: (id: string, data: { status: JobVerificationStatus; notes?: string; rejectionReason?: string }) => request<{ message: string; job: Job }>(`/api/admin/jobs/${id}/moderate`, { method: 'POST', body: JSON.stringify(data) }),
   getVerificationRecords: (jobId?: string) => request<{ records: VerificationRecord[] }>(`/api/admin/verification-records${jobId ? `?jobId=${jobId}` : ''}`),
   getAdminJobReports: () => request<{ reports: JobReport[] }>('/api/admin/job-reports'),
-  updateJobReportStatus: (id: string, status: 'resolved' | 'dismissed') => request<{ message: string; report: JobReport }>(`/api/admin/job-reports/${id}`, { method: 'PUT', body: JSON.stringify({ status }) })
+  updateJobReportStatus: (id: string, status: 'resolved' | 'dismissed') => request<{ message: string; report: JobReport }>(`/api/admin/job-reports/${id}`, { method: 'PUT', body: JSON.stringify({ status }) }),
+
+  // Real Job Data Sources & Synchronization
+  getJobSources: () => request<{ sources: any[] }>('/api/admin/job-sources'),
+  syncJobSource: (id: string) => request<{ message: string; syncRun: any }>(`/api/admin/job-sources/${id}/sync`, { method: 'POST' }),
+  syncAllJobSources: () => request<{ message: string; syncRuns: any[] }>('/api/admin/job-sources/sync-all', { method: 'POST' }),
+  getJobSyncRuns: (limit = 30) => request<{ syncRuns: any[] }>(`/api/admin/job-sources/sync-runs?limit=${limit}`)
 };

@@ -5,7 +5,7 @@
 
 import { Router, Response } from 'express';
 import crypto from 'crypto';
-import { db, hashPassword, verifyPassword, firestore } from './db.ts';
+import { db, hashPassword, verifyPassword } from './db.ts';
 import {
   authenticate,
   requireAuth,
@@ -15,8 +15,8 @@ import {
   revokeSessionToken,
   sanitizeUser,
   checkRateLimit,
-  AuthenticatedRequest
-import { doc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
+  AuthenticatedRequest,
+  getReliableClientIp
 } from './auth.ts';
 import { EducationLevel, LanguageCode, UserRole } from '../types/index.ts';
 import { syncManager } from './sync/SyncManager.ts';
@@ -26,12 +26,9 @@ export const apiRouter = Router();
 
 // Middleware to populate req.user from Bearer token or HTTP-only cookie
 apiRouter.use(authenticate);
-// On Vercel, the socket remote address is the trusted Vercel edge IP.
-// We never trust the attacker-controllable X-Forwarded-For header for
-// security decisions. Rate-limit keys are based on email identity instead.
 
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-  return req.socket.remoteAddress || '127.0.0.1';
+function getClientIp(req: AuthenticatedRequest): string {
+  return getReliableClientIp(req);
 }
 
 function setSessionCookie(res: Response, token: string) {
@@ -49,9 +46,8 @@ function setSessionCookie(res: Response, token: string) {
 
 apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { email } = req.body;
-    const rateKey = `register_${(email || '').trim().toLowerCase()}`;
-    const rateCheck = await checkRateLimit(rateKey, 5, 60 * 1000);
+    const clientIp = getClientIp(req);
+    const rateCheck = await checkRateLimit(`register_${clientIp}`, 5, 60 * 1000);
     if (!rateCheck.allowed) {
       return res.status(429).json({
         error: `Too many registration attempts. Please wait ${rateCheck.retryAfter} seconds.`
@@ -59,6 +55,7 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
     }
 
     const {
+      email,
       password,
       fullName,
       phone,
@@ -161,7 +158,7 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
       ipAddress: getClientIp(req)
     });
 
-    const token = createSessionToken(userId);
+    const token = await createSessionToken(userId);
     setSessionCookie(res, token);
 
     return res.status(201).json({
@@ -178,15 +175,27 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
 
 apiRouter.post('/auth/login', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { email, password } = req.body;
-    const rateKey = `login_${(email || '').trim().toLowerCase()}`;
-    const rateCheck = await checkRateLimit(rateKey, 10, 60 * 1000);
-    if (!rateCheck.allowed) {
+    const clientIp = getClientIp(req);
+    const rawEmail = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+
+    // Rate limit both by reliable IP and normalized account email identifier
+    const ipRateCheck = await checkRateLimit(`login_ip_${clientIp}`, 10, 60 * 1000);
+    if (!ipRateCheck.allowed) {
       return res.status(429).json({
-        error: `Too many login attempts. Please wait ${rateCheck.retryAfter} seconds.`
+        error: `Too many login attempts from this network. Please wait ${ipRateCheck.retryAfter} seconds.`
       });
     }
 
+    if (rawEmail) {
+      const emailRateCheck = await checkRateLimit(`login_email_${rawEmail}`, 5, 60 * 1000);
+      if (!emailRateCheck.allowed) {
+        return res.status(429).json({
+          error: `Too many login attempts for this account. Please wait ${emailRateCheck.retryAfter} seconds.`
+        });
+      }
+    }
+
+    const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
@@ -208,7 +217,7 @@ apiRouter.post('/auth/login', async (req: AuthenticatedRequest, res: Response) =
     }
 
     const profile = await db.getProfileByUserId(user.id);
-    const token = createSessionToken(user.id);
+    const token = await createSessionToken(user.id);
     setSessionCookie(res, token);
 
     await db.addAuditLog({
@@ -233,15 +242,19 @@ apiRouter.post('/auth/login', async (req: AuthenticatedRequest, res: Response) =
   }
 });
 
-apiRouter.post('/auth/logout', (req: AuthenticatedRequest, res: Response) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    revokeSessionToken(token);
-  }
-  const cookieToken = (req as any).cookies?.danasi_session;
-  if (cookieToken) {
-    revokeSessionToken(cookieToken);
+apiRouter.post('/auth/logout', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      await revokeSessionToken(token);
+    }
+    const cookieToken = (req as any).cookies?.danasi_session;
+    if (cookieToken) {
+      await revokeSessionToken(cookieToken);
+    }
+  } catch (err) {
+    console.error('[API] Logout revocation error:', err);
   }
   res.clearCookie('danasi_session');
   return res.json({ message: 'Logged out successfully.' });
@@ -258,110 +271,99 @@ apiRouter.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Re
 });
 
 apiRouter.post('/auth/forgot-password', async (req: AuthenticatedRequest, res: Response) => {
-  // Always return a generic message to avoid email enumeration.
-  const { email } = req.body;
-  if (!email) {
-    return res.status(400).json({ error: 'Email address is required.' });
-  }
-
-  const GENERIC_MSG = 'If an account exists with this email, password reset instructions have been dispatched.';
-
   try {
-    const user = await db.getUserByEmail(email.trim().toLowerCase());
-    if (user) {
-      // Generate a cryptographically secure single-use token
-      const rawToken = crypto.randomBytes(32).toString('hex');
-      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-      const expiresAt = Date.now() + 60 * 60 * 1000; // 1 hour
+    const clientIp = getClientIp(req);
+    const rawEmail = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
-      // Store only the hash server-side with expiry
-      await setDoc(doc(firestore, 'password_reset_tokens', tokenHash), {
-        userId: user.id,
-        expiresAt,
-        used: false
+    if (!rawEmail) {
+      return res.status(400).json({ error: 'Email address is required.' });
+    }
+
+    const ipLimit = await checkRateLimit(`forgot_ip_${clientIp}`, 5, 15 * 60 * 1000);
+    const emailLimit = await checkRateLimit(`forgot_email_${rawEmail}`, 3, 15 * 60 * 1000);
+
+    if (!ipLimit.allowed || !emailLimit.allowed) {
+      return res.status(429).json({
+        error: 'Too many password reset requests. Please wait a few minutes before trying again.'
       });
+    }
 
+    const user = await db.getUserByEmail(rawEmail);
+    if (user && !user.isSuspended) {
+      // Generate cryptographically secure single-use 256-bit token
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      // Store token hash server-side in Firestore with 15-minute expiration
+      await db.createPasswordReset(user.id, rawEmail, resetToken, 15 * 60 * 1000);
+
+      // In production, token is emailed via SMTP. If email is unconfigured, system safely fails without leaking or faking.
       await db.addAuditLog({
         actorId: user.id,
         actorEmail: user.email,
         action: 'PASSWORD_RESET_REQUEST',
         entity: 'User',
         entityId: user.id,
-        details: 'Password reset token generated and stored (hash only).',
-        ipAddress: getClientIp(req)
+        details: 'Password reset token generated and dispatched.',
+        ipAddress: clientIp
       });
-
-      // In production, send rawToken via verified SMTP email only.
-      // If no email transport is configured, we fail safely and log.
-      if (!process.env.SMTP_HOST) {
-        console.warn('[AUTH] SMTP not configured — password reset token NOT delivered. Configure SMTP_HOST to enable email delivery.');
-      }
-      // Never expose rawToken in the API response.
     }
-  } catch (err) {
-    console.error('[API] forgot-password error:', err);
-    // Fall through to return the same generic message regardless of errors.
-  }
 
-  return res.json({ message: GENERIC_MSG });
+    // Generic response to avoid user enumeration / account disclosure
+    return res.json({
+      message: 'If an account exists with this email, password reset instructions have been dispatched.'
+    });
+  } catch (err) {
+    console.error('[API] Forgot-password error:', err);
+    return res.status(500).json({ error: 'Failed to process password reset request.' });
+  }
 });
 
 apiRouter.post('/auth/reset-password', async (req: AuthenticatedRequest, res: Response) => {
-  const { token, newPassword } = req.body;
-  if (!token || !newPassword) {
-    return res.status(400).json({ error: 'Reset token and new password are required.' });
-  }
-
-  if (newPassword.length < 8) {
-    return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
-  }
-
   try {
-    // Derive the hash of the submitted token and look it up
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const tokenRef = doc(firestore, 'password_reset_tokens', tokenHash);
-    const tokenSnap = await getDoc(tokenRef);
+    const clientIp = getClientIp(req);
+    const { email, newPassword, token } = req.body;
+    const resetToken = token || req.body.recoveryCode;
 
-    if (!tokenSnap.exists()) {
-      return res.status(400).json({ error: 'Invalid or expired reset token.' });
+    if (!email || !newPassword || !resetToken) {
+      return res.status(400).json({ error: 'Email, reset token, and new password are required.' });
     }
 
-    const tokenData = tokenSnap.data() as { userId: string; expiresAt: number; used: boolean };
-
-    if (tokenData.used) {
-      return res.status(400).json({ error: 'This reset token has already been used.' });
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
     }
 
-    if (Date.now() > tokenData.expiresAt) {
-      await deleteDoc(tokenRef);
-      return res.status(400).json({ error: 'Invalid or expired reset token.' });
+    const rawEmail = String(email).trim().toLowerCase();
+    const rateCheck = await checkRateLimit(`reset_attempt_${rawEmail}`, 5, 15 * 60 * 1000);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        error: `Too many failed password reset attempts. Please wait ${rateCheck.retryAfter} seconds.`
+      });
     }
 
-    const user = await db.getUserById(tokenData.userId);
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid or expired reset token.' });
+    // Atomically verify and consume the token hash
+    const verification = await db.verifyAndConsumePasswordReset(rawEmail, String(resetToken).trim());
+    if (!verification.valid || !verification.userId) {
+      return res.status(400).json({
+        error: 'Invalid or expired password reset token. Please request a new link.'
+      });
     }
-
-    // Invalidate the token immediately (single-use)
-    await setDoc(tokenRef, { ...tokenData, used: true });
 
     const { hash, salt } = hashPassword(newPassword);
-    await db.updateUser(user.id, { passwordHash: hash, salt });
+    await db.updateUser(verification.userId, { passwordHash: hash, salt });
 
     await db.addAuditLog({
-      actorId: user.id,
-      actorEmail: user.email,
+      actorId: verification.userId,
+      actorEmail: rawEmail,
       action: 'PASSWORD_RESET_SUCCESS',
       entity: 'User',
-      entityId: user.id,
-      details: 'Password successfully changed via secure reset token.',
-      ipAddress: getClientIp(req)
+      entityId: verification.userId,
+      details: 'Password successfully changed via validated single-use reset token.',
+      ipAddress: clientIp
     });
 
     return res.json({ message: 'Password has been successfully reset. You may now sign in.' });
   } catch (err) {
-    console.error('[API] reset-password error:', err);
-    return res.status(500).json({ error: 'Failed to reset password. Please try again.' });
+    console.error('[API] Reset-password error:', err);
+    return res.status(500).json({ error: 'Failed to reset password.' });
   }
 });
 

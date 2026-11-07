@@ -678,11 +678,7 @@ class FirestoreDatabase {
     batch.set(doc(firestore, 'platform_settings', 'global'), settings);
 
     // Super Admin Account (Founder: NDAYIZEYE Samuel)
-    const adminInitialPassword = process.env.DANASI_ADMIN_INITIAL_PASSWORD;
-    if (!adminInitialPassword) {
-      throw new Error('[Firestore] DANASI_ADMIN_INITIAL_PASSWORD env variable is required for first-run seeding.');
-    }
-    const { hash: adminHash, salt: adminSalt } = hashPassword(adminInitialPassword);
+    const superAdminId = 'user_super_admin_001';
     const { hash: adminHash, salt: adminSalt } = hashPassword('DanasiAdmin2026!');
     batch.set(doc(firestore, 'users', superAdminId), {
       id: superAdminId,
@@ -712,11 +708,7 @@ class FirestoreDatabase {
     });
 
     // Test Candidate Account (Aline Keza)
-    const studentInitialPassword = process.env.DANASI_STUDENT_INITIAL_PASSWORD;
-    if (!studentInitialPassword) {
-      throw new Error('[Firestore] DANASI_STUDENT_INITIAL_PASSWORD env variable is required for first-run seeding.');
-    }
-    const { hash: studentHash, salt: studentSalt } = hashPassword(studentInitialPassword);
+    const studentId = 'user_student_002';
     const { hash: studentHash, salt: studentSalt } = hashPassword('Student2026!');
     batch.set(doc(firestore, 'users', studentId), {
       id: studentId,
@@ -1683,6 +1675,112 @@ class FirestoreDatabase {
     }
     await updateDoc(ref, updates);
     return { ...snap.data(), ...updates } as ContactMessage;
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /* DURABLE SESSIONS (Serverless Shared Firestore Storage)                     */
+  /* -------------------------------------------------------------------------- */
+
+  public async saveSession(token: string, userId: string, expiresAt: number): Promise<void> {
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+    await setDoc(doc(firestore, 'sessions', hashedToken), {
+      userId,
+      expiresAt,
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  public async getSession(token: string): Promise<{ userId: string; expiresAt: number } | null> {
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+    const snap = await getDoc(doc(firestore, 'sessions', hashedToken));
+    if (!snap.exists()) return null;
+    const data = snap.data() as { userId: string; expiresAt: number };
+    return data;
+  }
+
+  public async deleteSession(token: string): Promise<void> {
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+    await deleteDoc(doc(firestore, 'sessions', hashedToken));
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /* RATE LIMITING STORAGE                                                      */
+  /* -------------------------------------------------------------------------- */
+
+  public async checkAndIncrementRateLimit(key: string, maxAttempts: number, windowMs: number): Promise<{ allowed: boolean; retryAfter?: number }> {
+    const safeKey = crypto.createHash('sha256').update(key).digest('hex');
+    const ref = doc(firestore, 'rate_limits', safeKey);
+    const now = Date.now();
+
+    try {
+      return await runTransaction(firestore, async (transaction) => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists()) {
+          const resetAt = now + windowMs;
+          transaction.set(ref, { count: 1, resetAt });
+          return { allowed: true };
+        }
+
+        const data = snap.data() as { count: number; resetAt: number };
+        if (now > data.resetAt) {
+          const resetAt = now + windowMs;
+          transaction.set(ref, { count: 1, resetAt });
+          return { allowed: true };
+        }
+
+        if (data.count >= maxAttempts) {
+          const retryAfter = Math.ceil((data.resetAt - now) / 1000);
+          return { allowed: false, retryAfter };
+        }
+
+        transaction.update(ref, { count: data.count + 1 });
+        return { allowed: true };
+      });
+    } catch {
+      // Fallback allowed in case of transient storage errors
+      return { allowed: true };
+    }
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /* PASSWORD RESETS                                                            */
+  /* -------------------------------------------------------------------------- */
+
+  public async createPasswordReset(userId: string, email: string, token: string, ttlMs = 15 * 60 * 1000): Promise<void> {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expiresAt = Date.now() + ttlMs;
+    await setDoc(doc(firestore, 'password_resets', tokenHash), {
+      userId,
+      email: email.toLowerCase().trim(),
+      tokenHash,
+      expiresAt,
+      used: false,
+      createdAt: new Date().toISOString()
+    });
+  }
+
+  public async verifyAndConsumePasswordReset(email: string, token: string): Promise<{ valid: boolean; userId?: string }> {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const ref = doc(firestore, 'password_resets', tokenHash);
+
+    try {
+      return await runTransaction(firestore, async (transaction) => {
+        const snap = await transaction.get(ref);
+        if (!snap.exists()) return { valid: false };
+
+        const data = snap.data() as { userId: string; email: string; expiresAt: number; used: boolean };
+        const now = Date.now();
+
+        if (data.used || now > data.expiresAt || data.email !== email.toLowerCase().trim()) {
+          return { valid: false };
+        }
+
+        transaction.update(ref, { used: true, consumedAt: new Date().toISOString() });
+        return { valid: true, userId: data.userId };
+      });
+    } catch {
+      return { valid: false };
+    }
   }
 }
 

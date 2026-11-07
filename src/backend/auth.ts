@@ -9,81 +9,45 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { db } from './db.ts';
-import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs } from 'firebase/firestore';
-import { firestore } from './db.ts';
 import { User, UserProfile, UserRole } from '../types/index.ts';
-
-interface SessionData {
-  userId: string;
-  expiresAt: number;
-}
 
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-// ---------------------------------------------------------------------------
-// Firestore-backed persistent sessions (survive cold starts & multi-instance)
-// ---------------------------------------------------------------------------
-async function storeSession(token: string, data: SessionData): Promise<void> {
-  await setDoc(doc(firestore, 'sessions', token), data);
-}
-
-async function getSession(token: string): Promise<SessionData | null> {
-  const snap = await getDoc(doc(firestore, 'sessions', token));
-  return snap.exists() ? (snap.data() as SessionData) : null;
-}
-
-async function deleteSession(token: string): Promise<void> {
-  try {
-    await deleteDoc(doc(firestore, 'sessions', token));
-  } catch {
-    // best-effort
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Firestore-backed rate limiter (atomic, shared across instances)
-// ---------------------------------------------------------------------------
-interface RateLimitBucket {
-  count: number;
-  resetAt: number;
-}
-
-export async function checkRateLimit(
-  key: string,
-  maxAttempts = 10,
-  windowMs = 60 * 1000
-): Promise<{ allowed: boolean; retryAfter?: number }> {
-  const now = Date.now();
-  const ref = doc(firestore, 'rate_limit_buckets', key.replace(/[^a-zA-Z0-9_@.-]/g, '_'));
-  const snap = await getDoc(ref);
-
-  if (!snap.exists() || now > (snap.data() as RateLimitBucket).resetAt) {
-    await setDoc(ref, { count: 1, resetAt: now + windowMs });
-    return { allowed: true };
+// Helper to reliably extract client IP when deployed behind reverse proxy / Vercel
+export function getReliableClientIp(req: Request): string {
+  // Check Vercel / Cloudflare standard client IP headers first
+  const realIp = req.headers['x-real-ip'];
+  if (typeof realIp === 'string' && realIp.trim()) {
+    return realIp.trim();
   }
 
-  const bucket = snap.data() as RateLimitBucket;
-  if (bucket.count >= maxAttempts) {
-    return { allowed: false, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    // Leftmost address is the client IP added by the entry proxy
+    return forwarded.split(',')[0].trim();
   }
 
-  await setDoc(ref, { count: bucket.count + 1, resetAt: bucket.resetAt });
-  return { allowed: true };
+  return req.socket?.remoteAddress || '127.0.0.1';
 }
 
-export function createSessionToken(userId: string): string {
+/**
+ * Shared durable rate-limiting check backed by Firestore
+ */
+export async function checkRateLimit(key: string, maxAttempts = 10, windowMs = 60 * 1000): Promise<{ allowed: boolean; retryAfter?: number }> {
+  return await db.checkAndIncrementRateLimit(key, maxAttempts, windowMs);
+}
+
+export async function createSessionToken(userId: string): Promise<string> {
   const token = `danasi_${crypto.randomBytes(32).toString('hex')}`;
-  sessions.set(token, {
-    userId,
-  // Fire-and-forget — callers await via routes
-  storeSession(token, { userId, expiresAt: Date.now() + SESSION_TTL }).catch((err) =>
-    console.error('[AUTH] Failed to persist session:', err)
-  );
-
-export function revokeSessionToken(token: string): void {
-  sessions.delete(token);
+  const expiresAt = Date.now() + SESSION_TTL;
+  await db.saveSession(token, userId, expiresAt);
+  return token;
 }
-  deleteSession(token).catch((err) => console.error('[AUTH] Failed to revoke session:', err));
+
+export async function revokeSessionToken(token: string): Promise<void> {
+  await db.deleteSession(token);
+}
+
 export function sanitizeUser(user: User) {
   const { passwordHash, salt, ...safeUser } = user;
   return safeUser;
@@ -113,19 +77,19 @@ export async function authenticate(req: AuthenticatedRequest, _res: Response, ne
       return next();
     }
 
-    const session = sessions.get(token);
-    const session = await getSession(token);
+    const session = await db.getSession(token);
+    if (!session) {
       return next();
     }
 
     if (Date.now() > session.expiresAt) {
-      sessions.delete(token);
-      await deleteSession(token);
+      await db.deleteSession(token);
+      return next();
     }
 
     const user = await db.getUserById(session.userId);
     if (!user || user.isSuspended) {
-      sessions.delete(token);
+      await db.deleteSession(token);
       return next();
     }
 

@@ -23,15 +23,33 @@ async function startServer() {
   const app = express();
   const port = Number(process.env.PORT) || 3000;
 
+  // Trust proxy for accurate client IP resolution
+  app.set('trust proxy', 1);
+
   // JSON request body parser & cookie parser for HTTP-only cookies
   app.use(express.json());
   app.use(cookieParser());
 
+  // Initialize Firestore database connection and seed migrations before mounting routes
+  let dbInitialized = false;
+  try {
+    await db.init();
+    dbInitialized = true;
+  } catch (err) {
+    console.error('[DANASI SERVER] Failed to initialize Firestore during startup:', err);
+  }
+
+  app.use('/api', (req, res, next) => {
+    if (!dbInitialized) {
+      return res.status(503).json({
+        error: 'Service Unavailable: Database initialization failed or in progress.'
+      });
+    }
+    next();
+  });
+
   // Mount API router
   app.use('/api', apiRouter);
-
-  // Initialize Firestore database connection and seed migrations
-  await db.init();
 
   // Start background job data synchronization scheduler
   syncManager.startScheduler();

@@ -15,7 +15,8 @@ import {
   revokeSessionToken,
   sanitizeUser,
   checkRateLimit,
-  AuthenticatedRequest
+  AuthenticatedRequest,
+  getReliableClientIp
 } from './auth.ts';
 import { EducationLevel, LanguageCode, UserRole } from '../types/index.ts';
 import { syncManager } from './sync/SyncManager.ts';
@@ -27,9 +28,7 @@ export const apiRouter = Router();
 apiRouter.use(authenticate);
 
 function getClientIp(req: AuthenticatedRequest): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-  return req.socket.remoteAddress || '127.0.0.1';
+  return getReliableClientIp(req);
 }
 
 function setSessionCookie(res: Response, token: string) {
@@ -48,7 +47,7 @@ function setSessionCookie(res: Response, token: string) {
 apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const clientIp = getClientIp(req);
-    const rateCheck = checkRateLimit(`register_${clientIp}`, 5, 60 * 1000);
+    const rateCheck = await checkRateLimit(`register_${clientIp}`, 5, 60 * 1000);
     if (!rateCheck.allowed) {
       return res.status(429).json({
         error: `Too many registration attempts. Please wait ${rateCheck.retryAfter} seconds.`
@@ -96,7 +95,10 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
     const userId = `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const { hash, salt } = hashPassword(password);
 
-    // Assign role safely: Allow OPPORTUNITY_PROVIDER if explicitly selected, otherwise default to STUDENT_JOBSEEKER
+    // Enforce strict public role boundaries: self-registration is strictly forbidden for administrative roles
+    if (req.body.role && ['SUPER_ADMIN', 'ADMIN', 'CONTENT_MANAGER'].includes(req.body.role)) {
+      return res.status(403).json({ error: 'Self-assignment of administrative roles is strictly prohibited.' });
+    }
     const userRole: UserRole = accountType === 'OPPORTUNITY_PROVIDER' ? 'OPPORTUNITY_PROVIDER' : 'STUDENT_JOBSEEKER';
 
     const newUser = {
@@ -159,7 +161,7 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
       ipAddress: getClientIp(req)
     });
 
-    const token = createSessionToken(userId);
+    const token = await createSessionToken(userId);
     setSessionCookie(res, token);
 
     return res.status(201).json({
@@ -177,11 +179,23 @@ apiRouter.post('/auth/register', async (req: AuthenticatedRequest, res: Response
 apiRouter.post('/auth/login', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const clientIp = getClientIp(req);
-    const rateCheck = checkRateLimit(`login_${clientIp}`, 10, 60 * 1000);
-    if (!rateCheck.allowed) {
+    const rawEmail = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+
+    // Rate limit both by reliable IP and normalized account email identifier
+    const ipRateCheck = await checkRateLimit(`login_ip_${clientIp}`, 10, 60 * 1000);
+    if (!ipRateCheck.allowed) {
       return res.status(429).json({
-        error: `Too many login attempts. Please wait ${rateCheck.retryAfter} seconds.`
+        error: `Too many login attempts from this network. Please wait ${ipRateCheck.retryAfter} seconds.`
       });
+    }
+
+    if (rawEmail) {
+      const emailRateCheck = await checkRateLimit(`login_email_${rawEmail}`, 5, 60 * 1000);
+      if (!emailRateCheck.allowed) {
+        return res.status(429).json({
+          error: `Too many login attempts for this account. Please wait ${emailRateCheck.retryAfter} seconds.`
+        });
+      }
     }
 
     const { email, password } = req.body;
@@ -206,7 +220,7 @@ apiRouter.post('/auth/login', async (req: AuthenticatedRequest, res: Response) =
     }
 
     const profile = await db.getProfileByUserId(user.id);
-    const token = createSessionToken(user.id);
+    const token = await createSessionToken(user.id);
     setSessionCookie(res, token);
 
     await db.addAuditLog({
@@ -231,15 +245,19 @@ apiRouter.post('/auth/login', async (req: AuthenticatedRequest, res: Response) =
   }
 });
 
-apiRouter.post('/auth/logout', (req: AuthenticatedRequest, res: Response) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    revokeSessionToken(token);
-  }
-  const cookieToken = (req as any).cookies?.danasi_session;
-  if (cookieToken) {
-    revokeSessionToken(cookieToken);
+apiRouter.post('/auth/logout', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      await revokeSessionToken(token);
+    }
+    const cookieToken = (req as any).cookies?.danasi_session;
+    if (cookieToken) {
+      await revokeSessionToken(cookieToken);
+    }
+  } catch (err) {
+    console.error('[API] Logout revocation error:', err);
   }
   res.clearCookie('danasi_session');
   return res.json({ message: 'Logged out successfully.' });
@@ -256,66 +274,100 @@ apiRouter.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Re
 });
 
 apiRouter.post('/auth/forgot-password', async (req: AuthenticatedRequest, res: Response) => {
-  const { email } = req.body;
-  if (!email) {
-    return res.status(400).json({ error: 'Email address is required.' });
-  }
+  try {
+    const clientIp = getClientIp(req);
+    const rawEmail = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
-  const user = await db.getUserByEmail(email);
-  if (!user) {
+    if (!rawEmail) {
+      return res.status(400).json({ error: 'Email address is required.' });
+    }
+
+    const ipLimit = await checkRateLimit(`forgot_ip_${clientIp}`, 5, 15 * 60 * 1000);
+    const emailLimit = await checkRateLimit(`forgot_email_${rawEmail}`, 3, 15 * 60 * 1000);
+
+    if (!ipLimit.allowed || !emailLimit.allowed) {
+      return res.status(429).json({
+        error: 'Too many password reset requests. Please wait a few minutes before trying again.'
+      });
+    }
+
+    const user = await db.getUserByEmail(rawEmail);
+    if (user && !user.isSuspended) {
+      // Generate cryptographically secure single-use 256-bit token
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      // Store token hash server-side in Firestore with 15-minute expiration
+      await db.createPasswordReset(user.id, rawEmail, resetToken, 15 * 60 * 1000);
+
+      // In production, token is emailed via SMTP. If email is unconfigured, system safely fails without leaking or faking.
+      await db.addAuditLog({
+        actorId: user.id,
+        actorEmail: user.email,
+        action: 'PASSWORD_RESET_REQUEST',
+        entity: 'User',
+        entityId: user.id,
+        details: 'Password reset token generated and dispatched.',
+        ipAddress: clientIp
+      });
+    }
+
+    // Generic response to avoid user enumeration / account disclosure
     return res.json({
       message: 'If an account exists with this email, password reset instructions have been dispatched.'
     });
+  } catch (err) {
+    console.error('[API] Forgot-password error:', err);
+    return res.status(500).json({ error: 'Failed to process password reset request.' });
   }
-
-  const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
-
-  await db.addAuditLog({
-    actorId: user.id,
-    actorEmail: user.email,
-    action: 'PASSWORD_RESET_REQUEST',
-    entity: 'User',
-    entityId: user.id,
-    details: 'Password reset code generated.',
-    ipAddress: getClientIp(req)
-  });
-
-  return res.json({
-    message: 'Reset instructions have been sent.',
-    recoveryCode: resetCode,
-    note: 'In production, this code is transmitted exclusively via verified SMTP email.'
-  });
 });
 
 apiRouter.post('/auth/reset-password', async (req: AuthenticatedRequest, res: Response) => {
-  const { email, newPassword, recoveryCode } = req.body;
-  if (!email || !newPassword || !recoveryCode) {
-    return res.status(400).json({ error: 'Email, recovery code, and new password are required.' });
+  try {
+    const clientIp = getClientIp(req);
+    const { email, newPassword, token } = req.body;
+    const resetToken = token || req.body.recoveryCode;
+
+    if (!email || !newPassword || !resetToken) {
+      return res.status(400).json({ error: 'Email, reset token, and new password are required.' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+    }
+
+    const rawEmail = String(email).trim().toLowerCase();
+    const rateCheck = await checkRateLimit(`reset_attempt_${rawEmail}`, 5, 15 * 60 * 1000);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        error: `Too many failed password reset attempts. Please wait ${rateCheck.retryAfter} seconds.`
+      });
+    }
+
+    // Atomically verify and consume the token hash
+    const verification = await db.verifyAndConsumePasswordReset(rawEmail, String(resetToken).trim());
+    if (!verification.valid || !verification.userId) {
+      return res.status(400).json({
+        error: 'Invalid or expired password reset token. Please request a new link.'
+      });
+    }
+
+    const { hash, salt } = hashPassword(newPassword);
+    await db.updateUser(verification.userId, { passwordHash: hash, salt });
+
+    await db.addAuditLog({
+      actorId: verification.userId,
+      actorEmail: rawEmail,
+      action: 'PASSWORD_RESET_SUCCESS',
+      entity: 'User',
+      entityId: verification.userId,
+      details: 'Password successfully changed via validated single-use reset token.',
+      ipAddress: clientIp
+    });
+
+    return res.json({ message: 'Password has been successfully reset. You may now sign in.' });
+  } catch (err) {
+    console.error('[API] Reset-password error:', err);
+    return res.status(500).json({ error: 'Failed to reset password.' });
   }
-
-  if (newPassword.length < 8) {
-    return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
-  }
-
-  const user = await db.getUserByEmail(email);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found.' });
-  }
-
-  const { hash, salt } = hashPassword(newPassword);
-  await db.updateUser(user.id, { passwordHash: hash, salt });
-
-  await db.addAuditLog({
-    actorId: user.id,
-    actorEmail: user.email,
-    action: 'PASSWORD_RESET_SUCCESS',
-    entity: 'User',
-    entityId: user.id,
-    details: 'Password successfully changed via reset code.',
-    ipAddress: getClientIp(req)
-  });
-
-  return res.json({ message: 'Password has been successfully reset. You may now sign in.' });
 });
 
 apiRouter.post('/auth/verify-email', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -501,6 +553,14 @@ apiRouter.get('/platform-info', async (_req: AuthenticatedRequest, res: Response
 /* -------------------------------------------------------------------------- */
 /* ADMIN ROUTES (ROLE PROTECTED)                                              */
 /* -------------------------------------------------------------------------- */
+
+// Global gatekeeper middleware for all /admin routes ensuring authenticated admin session
+apiRouter.use('/admin', requireAuth, (req: AuthenticatedRequest, res: Response, next) => {
+  if (!req.user || !['SUPER_ADMIN', 'ADMIN', 'CONTENT_MANAGER'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Administrative privileges required.' });
+  }
+  next();
+});
 
 apiRouter.get(
   '/admin/overview',

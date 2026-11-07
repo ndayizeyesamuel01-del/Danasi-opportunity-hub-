@@ -38,7 +38,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [accountType, setAccountType] = useState<'STUDENT_JOBSEEKER' | 'OPPORTUNITY_PROVIDER'>('STUDENT_JOBSEEKER');
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [educationLevel, setEducationLevel] = useState<EducationLevel>("Bachelor's Degree");
-  const [recoveryCode, setRecoveryCode] = useState('');
+  const [resetToken, setResetToken] = useState('');
   const [newPassword, setNewPassword] = useState('');
 
   const [loading, setLoading] = useState(false);
@@ -106,12 +106,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       const res = await api.forgotPassword(email);
       setInfo(res.message);
-      if (res.recoveryCode) {
-        setRecoveryCode(res.recoveryCode);
-        setMode('reset');
-      }
+      setMode('reset');
     } catch (err: any) {
-      setError(err.message || 'Could not send recovery instructions.');
+      setError(err.message || 'Could not process password recovery request.');
     } finally {
       setLoading(false);
     }
@@ -122,29 +119,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setError(null);
     setLoading(true);
     try {
-      await api.resetPassword({ email, recoveryCode, newPassword });
+      await api.resetPassword({ email, token: resetToken, newPassword });
       setInfo('Password reset successfully. You can now sign in.');
       setMode('login');
       setPassword(newPassword);
     } catch (err: any) {
-      setError(err.message || 'Failed to reset password.');
+      setError(err.message || 'Failed to reset password. The token may be invalid or expired.');
     } finally {
       setLoading(false);
     }
-  };
-
-  // Quick Testing Helper
-  const fillCredentials = (type: 'super_admin' | 'student') => {
-    if (type === 'super_admin') {
-      setEmail('danasitechnicalcollege@gmail.com');
-      setPassword('DanasiAdmin2026!');
-      setMode('login');
-    } else {
-      setEmail('student@danasi.com');
-      setPassword('Student2026!');
-      setMode('login');
-    }
-    setError(null);
   };
 
   return (
@@ -157,7 +140,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               {mode === 'login' && 'Sign In to DANASI'}
               {mode === 'register' && 'Create Platform Account'}
               {mode === 'forgot' && 'Reset Account Password'}
-              {mode === 'reset' && 'Enter Recovery Code'}
+              {mode === 'reset' && 'Set New Password'}
             </h3>
             <p className="text-[11px] text-slate-500">
               DANASITECHNICALCOLLEGE · Global Opportunities
@@ -186,29 +169,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <span>{info}</span>
             </div>
           )}
-
-          {/* Quick Demo Account Selector */}
-          <div className="p-3 rounded-xl bg-slate-100 border border-slate-200 text-xs space-y-2">
-            <div className="flex items-center justify-between text-slate-600 font-semibold text-[11px]">
-              <span>Quick Test Accounts:</span>
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => fillCredentials('super_admin')}
-                className="flex-1 py-1.5 px-2 bg-slate-900 text-white hover:bg-slate-800 rounded text-[11px] font-medium transition-colors truncate"
-              >
-                Admin (DANASI)
-              </button>
-              <button
-                type="button"
-                onClick={() => fillCredentials('student')}
-                className="flex-1 py-1.5 px-2 bg-blue-700 text-white hover:bg-blue-600 rounded text-[11px] font-medium transition-colors truncate"
-              >
-                Candidate (Aline)
-              </button>
-            </div>
-          </div>
 
           {/* LOGIN FORM */}
           {mode === 'login' && (
@@ -452,18 +412,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </form>
           )}
 
-          {/* RESET PASSWORD WITH CODE */}
+          {/* RESET PASSWORD WITH SECURE TOKEN */}
           {mode === 'reset' && (
             <form onSubmit={handleResetPassword} className="space-y-4">
               <div className="space-y-1">
-                <label className="text-xs font-semibold text-slate-700">Recovery Code</label>
+                <label className="text-xs font-semibold text-slate-700">Security Reset Token</label>
                 <input
                   type="text"
                   required
-                  value={recoveryCode}
-                  onChange={(e) => setRecoveryCode(e.target.value)}
-                  placeholder="6-digit recovery code"
-                  className="w-full px-3 py-2 text-xs font-mono text-center tracking-widest rounded-lg border border-slate-300 focus:outline-none focus:border-blue-600"
+                  value={resetToken}
+                  onChange={(e) => setResetToken(e.target.value)}
+                  placeholder="Paste reset token from email"
+                  className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 focus:outline-none focus:border-blue-600"
                 />
               </div>
 

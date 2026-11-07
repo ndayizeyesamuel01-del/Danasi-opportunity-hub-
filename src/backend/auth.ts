@@ -1,7 +1,7 @@
 /**
  * DANASI OPPORTUNITY HUB — Authentication & Authorization Middleware
  * Founder: NDAYIZEYE Samuel
- * 
+ *
  * Supports both Bearer Token and Secure HTTP-Only Cookie session management.
  * Protects admin routes and enforces server-side role validation.
  */
@@ -11,50 +11,41 @@ import crypto from 'crypto';
 import { db } from './db.ts';
 import { User, UserProfile, UserRole } from '../types/index.ts';
 
-interface SessionData {
-  userId: string;
-  expiresAt: number;
-}
-
-const sessions = new Map<string, SessionData>();
 const SESSION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-// Rate limiter storage for IP authentication attempts
-interface RateLimitBucket {
-  count: number;
-  resetAt: number;
-}
-const rateLimitMap = new Map<string, RateLimitBucket>();
-
-export function checkRateLimit(key: string, maxAttempts = 10, windowMs = 60 * 1000): { allowed: boolean; retryAfter?: number } {
-  const now = Date.now();
-  const bucket = rateLimitMap.get(key);
-
-  if (!bucket || now > bucket.resetAt) {
-    rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
-    return { allowed: true };
+// Helper to reliably extract client IP when deployed behind reverse proxy / Vercel
+export function getReliableClientIp(req: Request): string {
+  // Check Vercel / Cloudflare standard client IP headers first
+  const realIp = req.headers['x-real-ip'];
+  if (typeof realIp === 'string' && realIp.trim()) {
+    return realIp.trim();
   }
 
-  if (bucket.count >= maxAttempts) {
-    const retryAfter = Math.ceil((bucket.resetAt - now) / 1000);
-    return { allowed: false, retryAfter };
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    // Leftmost address is the client IP added by the entry proxy
+    return forwarded.split(',')[0].trim();
   }
 
-  bucket.count++;
-  return { allowed: true };
+  return req.socket?.remoteAddress || '127.0.0.1';
 }
 
-export function createSessionToken(userId: string): string {
+/**
+ * Shared durable rate-limiting check backed by Firestore
+ */
+export async function checkRateLimit(key: string, maxAttempts = 10, windowMs = 60 * 1000): Promise<{ allowed: boolean; retryAfter?: number }> {
+  return await db.checkAndIncrementRateLimit(key, maxAttempts, windowMs);
+}
+
+export async function createSessionToken(userId: string): Promise<string> {
   const token = `danasi_${crypto.randomBytes(32).toString('hex')}`;
-  sessions.set(token, {
-    userId,
-    expiresAt: Date.now() + SESSION_TTL
-  });
+  const expiresAt = Date.now() + SESSION_TTL;
+  await db.saveSession(token, userId, expiresAt);
   return token;
 }
 
-export function revokeSessionToken(token: string): void {
-  sessions.delete(token);
+export async function revokeSessionToken(token: string): Promise<void> {
+  await db.deleteSession(token);
 }
 
 export function sanitizeUser(user: User) {
@@ -86,19 +77,19 @@ export async function authenticate(req: AuthenticatedRequest, _res: Response, ne
       return next();
     }
 
-    const session = sessions.get(token);
+    const session = await db.getSession(token);
     if (!session) {
       return next();
     }
 
     if (Date.now() > session.expiresAt) {
-      sessions.delete(token);
+      await db.deleteSession(token);
       return next();
     }
 
     const user = await db.getUserById(session.userId);
     if (!user || user.isSuspended) {
-      sessions.delete(token);
+      await db.deleteSession(token);
       return next();
     }
 

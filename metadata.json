@@ -1,0 +1,6 @@
+{
+  "name": "DANASI OPPORTUNITY HUB",
+  "description": "Your Gateway to Jobs, Scholarships & Global Opportunities. Discover verified global opportunities, career preparation tools, and international academic pathways.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

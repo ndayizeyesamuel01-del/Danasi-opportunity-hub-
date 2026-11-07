@@ -1,0 +1,223 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Registered user credentials and account status",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email", "description": "Candidate or administrator email address" },
+        "role": { "type": "string", "enum": ["SUPER_ADMIN", "ADMIN", "CONTENT_MANAGER", "OPPORTUNITY_PROVIDER", "STUDENT_JOBSEEKER"], "description": "Role-based access control level" },
+        "emailVerified": { "type": "boolean", "description": "Whether email has been verified" },
+        "isSuspended": { "type": "boolean", "description": "Whether account is administratively suspended" },
+        "passwordHash": { "type": "string", "description": "Cryptographic scrypt hash of password" },
+        "salt": { "type": "string", "description": "Random cryptographic salt" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Candidate academic credentials and profile dossier",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "fullName": { "type": "string", "maxLength": 100 },
+        "headline": { "type": "string", "maxLength": 200 },
+        "bio": { "type": "string", "maxLength": 1000 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "country": { "type": "string", "maxLength": 60 },
+        "city": { "type": "string", "maxLength": 60 },
+        "educationLevel": { "type": "string", "enum": ["High School", "Diploma / TVET", "Bachelor's Degree", "Master's Degree", "Doctorate / PhD", "Self-Taught / Professional"] },
+        "professionalInterests": { "type": "array" },
+        "preferredCategories": { "type": "array" },
+        "preferredLanguage": { "type": "string", "enum": ["en", "rw", "fr"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "fullName"]
+    },
+    "Job": {
+      "title": "Job",
+      "description": "Global job listing with verification and original source tracking",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 150, "description": "Official job title of the vacancy" },
+        "employerId": { "type": "string", "description": "Foreign key reference to employers collection" },
+        "employerName": { "type": "string", "maxLength": 100, "description": "Official name of the hiring entity" },
+        "employerLogo": { "type": "string", "description": "URL to employer brand logo" },
+        "country": { "type": "string", "maxLength": 80, "description": "Country where the position is based or Worldwide" },
+        "city": { "type": "string", "maxLength": 80, "description": "City where the position is based or Remote" },
+        "workplaceArrangement": { "type": "string", "enum": ["remote", "on-site", "hybrid"], "description": "Physical workplace arrangement" },
+        "employmentType": { "type": "string", "enum": ["Full-Time", "Part-Time", "Internship", "Fellowship", "Contract", "Volunteer"], "description": "Contractual employment type" },
+        "categorySlug": { "type": "string", "description": "Slug of the primary job category" },
+        "experienceLevel": { "type": "string", "enum": ["Entry-Level", "Mid-Level", "Senior", "Executive"], "description": "Required seniority level" },
+        "educationRequirement": { "type": "string", "description": "Minimum formal educational attainment required" },
+        "salaryRange": { "type": "string", "description": "Disclosed salary or compensation benchmark" },
+        "requiredSkills": { "type": "array", "description": "Array of required technical and professional competencies" },
+        "description": { "type": "string", "maxLength": 5000, "description": "Full job description and context" },
+        "responsibilities": { "type": "array", "description": "List of core job responsibilities and deliverables" },
+        "applicationRequirements": { "type": "array", "description": "List of documents and candidate criteria required" },
+        "deadline": { "type": "string", "description": "Application deadline in YYYY-MM-DD format" },
+        "originalSourceUrl": { "type": "string", "description": "Official direct URL to employer career page" },
+        "sourceOrganization": { "type": "string", "description": "Name of publisher or partner source" },
+        "isDemo": { "type": "boolean", "description": "Flag indicating verified demo listing" },
+        "status": { "type": "string", "enum": ["PENDING_REVIEW", "VERIFIED", "REJECTED", "EXPIRED", "SUSPENDED"], "description": "Workflow verification status" },
+        "rejectionReason": { "type": "string", "description": "Administrative notes when status is REJECTED" },
+        "suspiciousFlags": { "type": "array", "description": "Automated security flags for links, free forms, or deceptive compensation" },
+        "providerId": { "type": "string", "description": "User ID of the submitter" },
+        "providerEmail": { "type": "string", "description": "Email address of the submitter" },
+        "verifiedAt": { "type": "string", "format": "date-time", "description": "Timestamp when admin verified the job" },
+        "verifiedBy": { "type": "string", "description": "Admin email or identifier who conducted review" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last modification timestamp" }
+      },
+      "required": ["title", "employerName", "country", "categorySlug", "originalSourceUrl", "status"]
+    },
+    "Employer": {
+      "title": "Employer",
+      "description": "Verified organization or company entity",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100, "description": "Official registered name of the employer" },
+        "logo": { "type": "string", "description": "Direct URL or avatar icon for employer" },
+        "website": { "type": "string", "description": "Official primary domain of the organization" },
+        "description": { "type": "string", "maxLength": 1000, "description": "Overview of company mission and operations" },
+        "country": { "type": "string", "maxLength": 80, "description": "Headquarters country" },
+        "city": { "type": "string", "maxLength": 80, "description": "Headquarters city" },
+        "industry": { "type": "string", "maxLength": 80, "description": "Industry sector" },
+        "verified": { "type": "boolean", "description": "Whether organization has been authenticated by DANASI admins" },
+        "createdBy": { "type": "string", "description": "User ID who registered this organization" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Registration timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last profile update timestamp" }
+      },
+      "required": ["name", "country", "industry"]
+    },
+    "OpportunityCategory": {
+      "title": "OpportunityCategory",
+      "description": "Standardized category definition for opportunity indexing",
+      "type": "object",
+      "properties": {
+        "slug": { "type": "string", "description": "Unique URL slug identifier" },
+        "nameEn": { "type": "string", "description": "English category name" },
+        "nameRw": { "type": "string", "description": "Kinyarwanda category name" },
+        "nameFr": { "type": "string", "description": "French category name" },
+        "descriptionEn": { "type": "string", "description": "English description" },
+        "descriptionRw": { "type": "string", "description": "Kinyarwanda description" },
+        "descriptionFr": { "type": "string", "description": "French description" },
+        "icon": { "type": "string", "description": "Lucide icon identifier" },
+        "isActive": { "type": "boolean", "description": "Whether category is publicly visible" },
+        "displayOrder": { "type": "number", "description": "Numeric sort order in menus" }
+      },
+      "required": ["slug", "nameEn", "nameRw", "nameFr"]
+    },
+    "JobReport": {
+      "title": "JobReport",
+      "description": "Candidate flag for suspicious, scam, or expired vacancy",
+      "type": "object",
+      "properties": {
+        "jobId": { "type": "string", "description": "ID of reported job" },
+        "jobTitle": { "type": "string", "description": "Title of reported job" },
+        "employerName": { "type": "string", "description": "Employer name" },
+        "reporterId": { "type": "string", "description": "User ID of reporter or guest" },
+        "reporterEmail": { "type": "string", "description": "Email address of reporter" },
+        "reason": { "type": "string", "enum": ["MISLEADING_SALARY", "SUSPICIOUS_LINK", "FEE_SOLICITATION", "EXPIRED_VACANCY", "OTHER"], "description": "Category of violation" },
+        "details": { "type": "string", "maxLength": 1000, "description": "User submitted explanation" },
+        "status": { "type": "string", "enum": ["pending", "resolved", "dismissed"], "description": "Review status by moderator" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "resolvedAt": { "type": "string", "format": "date-time" },
+        "resolvedBy": { "type": "string" }
+      },
+      "required": ["jobId", "reason", "details"]
+    },
+    "SavedJob": {
+      "title": "SavedJob",
+      "description": "Bookmarked job opportunities for candidates",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "ID of student or jobseeker user" },
+        "jobId": { "type": "string", "description": "Referenced job ID" },
+        "jobTitle": { "type": "string", "description": "Title snapshot for instant UI rendering" },
+        "employerName": { "type": "string", "description": "Employer snapshot" },
+        "workplaceArrangement": { "type": "string", "description": "Workplace arrangement snapshot" },
+        "deadline": { "type": "string", "description": "Deadline snapshot" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp when candidate bookmarked the job" }
+      },
+      "required": ["userId", "jobId", "jobTitle"]
+    },
+    "JobApplicationTracker": {
+      "title": "JobApplicationTracker",
+      "description": "Candidate personal job application milestone tracker across 7 pipeline stages",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "ID of the applicant" },
+        "jobId": { "type": "string", "description": "Referenced job opportunity ID" },
+        "jobTitle": { "type": "string", "description": "Job title snapshot" },
+        "employerName": { "type": "string", "description": "Employer name snapshot" },
+        "workplaceArrangement": { "type": "string", "description": "Workplace arrangement snapshot" },
+        "status": { "type": "string", "enum": ["INTERESTED", "PREPARING", "APPLIED", "INTERVIEW", "REJECTED", "ACCEPTED", "WITHDRAWN"], "description": "Pipeline stage" },
+        "appliedDate": { "type": "string", "description": "Date application was formally submitted" },
+        "deadline": { "type": "string", "description": "Application deadline" },
+        "notes": { "type": "string", "maxLength": 2000, "description": "Personal preparation notes, questions, and portfolio links" },
+        "originalSourceUrl": { "type": "string", "description": "Direct employer application link" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Initial tracking record timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last status transition timestamp" }
+      },
+      "required": ["userId", "jobId", "status"]
+    },
+    "VerificationRecord": {
+      "title": "VerificationRecord",
+      "description": "Immutable administrative moderation audit record",
+      "type": "object",
+      "properties": {
+        "jobId": { "type": "string", "description": "Target job identifier" },
+        "jobTitle": { "type": "string", "description": "Title of job audited" },
+        "previousStatus": { "type": "string", "description": "Status before moderation transition" },
+        "newStatus": { "type": "string", "description": "Resulting verification status" },
+        "moderatorId": { "type": "string", "description": "ID of moderator or system" },
+        "moderatorEmail": { "type": "string", "description": "Email of admin who verified or rejected" },
+        "notes": { "type": "string", "description": "Audit notes or rejection rationale" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Date-time of moderation review" }
+      },
+      "required": ["jobId", "newStatus", "moderatorEmail", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Primary user accounts"
+    },
+    "/user_profiles/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile dossiers"
+    },
+    "/jobs/{jobId}": {
+      "schema": "Job",
+      "description": "Global job vacancies with verification workflow"
+    },
+    "/employers/{employerId}": {
+      "schema": "Employer",
+      "description": "Verified organizations and employers directory"
+    },
+    "/job_categories/{categoryId}": {
+      "schema": "OpportunityCategory",
+      "description": "12 core job categories"
+    },
+    "/job_reports/{reportId}": {
+      "schema": "JobReport",
+      "description": "Suspicious job reports and fraud screening flags"
+    },
+    "/saved_jobs/{savedJobId}": {
+      "schema": "SavedJob",
+      "description": "Candidate bookmarked job opportunities"
+    },
+    "/job_applications/{applicationId}": {
+      "schema": "JobApplicationTracker",
+      "description": "Candidate application tracking milestones across 7 pipeline stages"
+    },
+    "/verification_records/{recordId}": {
+      "schema": "VerificationRecord",
+      "description": "Opportunity audit and moderation review ledger"
+    }
+  }
+}
